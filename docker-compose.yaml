@@ -1,0 +1,13 @@
+services:
+  bot:
+    build: .
+    restart: unless-stopped
+    environment:
+      # Set BOT_TOKEN in Coolify's Environment Variables tab (mark it as a secret).
+      - BOT_TOKEN=${BOT_TOKEN:?BOT_TOKEN is required}
+      - SEND2EREADER_URL=${SEND2EREADER_URL:-https://send.djazz.se}
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
