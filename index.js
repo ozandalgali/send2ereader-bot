@@ -1,6 +1,5 @@
-const TelegramBot = require('node-telegram-bot-api');
-const axios = require('axios');
-const FormData = require('form-data');
+import { Bot, GrammyError, HttpError } from 'grammy';
+import { uploadToEreader } from './upload.js';
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const SEND2EREADER_URL = process.env.SEND2EREADER_URL || 'https://send.djazz.se';
@@ -10,209 +9,199 @@ if (!BOT_TOKEN) {
   process.exit(1);
 }
 
-const bot = new TelegramBot(BOT_TOKEN, { polling: true });
-
-bot.on('polling_error', (error) => {
-  console.error('Polling error:', error.message);
-});
-
-// Store user settings (in production, use a database)
-const userSettings = {};
-
 const SUPPORTED_EXTENSIONS = ['.epub', '.mobi', '.pdf', '.txt', '.cbz', '.cbr', '.html'];
 
+// Telegram's Bot API refuses to serve files larger than this to bots.
+const TELEGRAM_MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024;
+
+// Per-chat settings. In memory only: a restart or redeploy clears every key.
+const userSettings = new Map();
+
 function getUserSettings(chatId) {
-  if (!userSettings[chatId]) {
-    userSettings[chatId] = {
+  let settings = userSettings.get(chatId);
+  if (!settings) {
+    settings = {
       key: null,
-      kepubify: true,  // Default on for Kobo
+      kepubify: true, // Default on for Kobo
       kindlegen: false,
-      pdfcropmargins: false
+      pdfcropmargins: false,
     };
+    userSettings.set(chatId, settings);
   }
-  return userSettings[chatId];
+  return settings;
 }
 
-bot.onText(/\/start/, (msg) => {
-  const chatId = msg.chat.id;
-  getUserSettings(chatId);
+const bot = new Bot(BOT_TOKEN);
 
-  bot.sendMessage(chatId,
+bot.command('start', async (ctx) => {
+  getUserSettings(ctx.chat.id);
+  await ctx.reply(
     `*Welcome to Send2Ereader Bot!*\n\n` +
-    `This bot forwards ebook files directly to your Kobo/Kindle.\n\n` +
-    `*Setup:*\n` +
-    `1. On your ereader, open the browser and go to:\n` +
-    `   \`send.djazz.se\`\n` +
-    `2. Copy your unique key shown on screen\n` +
-    `3. Send me the key with: /setkey YOUR_KEY\n\n` +
-    `*Then:*\n` +
-    `Just forward any ebook file to me and I'll send it to your ereader!\n\n` +
-    `*Commands:*\n` +
-    `/setkey KEY - Set your ereader key\n` +
-    `/settings - View/change conversion settings\n` +
-    `/help - Show this message`,
-    { parse_mode: 'Markdown' }
+      `This bot forwards ebook files directly to your Kobo/Kindle.\n\n` +
+      `*Setup:*\n` +
+      `1. On your ereader, open the browser and go to:\n` +
+      `   \`send.djazz.se\`\n` +
+      `2. Copy your unique key shown on screen\n` +
+      `3. Send me the key with: /setkey YOUR_KEY\n\n` +
+      `*Then:*\n` +
+      `Just forward any ebook file to me and I'll send it to your ereader!\n\n` +
+      `*Commands:*\n` +
+      `/setkey KEY - Set your ereader key\n` +
+      `/settings - View/change conversion settings\n` +
+      `/help - Show this message`,
+    { parse_mode: 'Markdown' },
   );
 });
 
-bot.onText(/\/help/, (msg) => {
-  bot.sendMessage(msg.chat.id,
+bot.command('help', async (ctx) => {
+  await ctx.reply(
     `*Send2Ereader Bot Help*\n\n` +
-    `*Supported formats:* EPUB, MOBI, PDF, TXT, CBZ, CBR, HTML\n\n` +
-    `*Commands:*\n` +
-    `/setkey KEY - Set your ereader key\n` +
-    `/settings - View/change conversion settings\n` +
-    `/kepubify - Toggle Kepubify (Kobo EPUB enhancement)\n` +
-    `/kindlegen - Toggle KindleGen (EPUB to MOBI)\n` +
-    `/pdfcrop - Toggle PDF margin cropping\n\n` +
-    `*Usage:*\n` +
-    `Just forward or send any ebook file to me!`,
-    { parse_mode: 'Markdown' }
+      `*Supported formats:* EPUB, MOBI, PDF, TXT, CBZ, CBR, HTML\n\n` +
+      `*Commands:*\n` +
+      `/setkey KEY - Set your ereader key\n` +
+      `/settings - View/change conversion settings\n` +
+      `/kepubify - Toggle Kepubify (Kobo EPUB enhancement)\n` +
+      `/kindlegen - Toggle KindleGen (EPUB to MOBI)\n` +
+      `/pdfcrop - Toggle PDF margin cropping\n\n` +
+      `*Usage:*\n` +
+      `Just forward or send any ebook file to me!`,
+    { parse_mode: 'Markdown' },
   );
 });
 
-bot.onText(/\/setkey (.+)/, (msg, match) => {
-  const chatId = msg.chat.id;
-  const key = match[1].trim().toUpperCase();
+bot.command('setkey', async (ctx) => {
+  const key = ctx.match.trim().toUpperCase();
 
   if (key.length < 3) {
-    bot.sendMessage(chatId, 'Invalid key. Please enter the key shown on your ereader.');
+    await ctx.reply('Invalid key. Please enter the key shown on your ereader.');
     return;
   }
 
-  const settings = getUserSettings(chatId);
-  settings.key = key;
-
-  bot.sendMessage(chatId,
-    `Key set to: \`${key}\`\n\nNow send me an ebook file!`,
-    { parse_mode: 'Markdown' }
-  );
+  getUserSettings(ctx.chat.id).key = key;
+  await ctx.reply(`Key set to: \`${key}\`\n\nNow send me an ebook file!`, {
+    parse_mode: 'Markdown',
+  });
 });
 
-bot.onText(/\/settings/, (msg) => {
-  const chatId = msg.chat.id;
-  const settings = getUserSettings(chatId);
-
-  const keyStatus = settings.key ? `\`${settings.key}\`` : 'Not set';
-
-  bot.sendMessage(chatId,
+bot.command('settings', async (ctx) => {
+  const settings = getUserSettings(ctx.chat.id);
+  await ctx.reply(
     `*Current Settings:*\n\n` +
-    `Key: ${keyStatus}\n` +
-    `Kepubify (Kobo): ${settings.kepubify ? 'ON' : 'OFF'}\n` +
-    `KindleGen: ${settings.kindlegen ? 'ON' : 'OFF'}\n` +
-    `PDF Crop: ${settings.pdfcropmargins ? 'ON' : 'OFF'}\n\n` +
-    `Use /kepubify, /kindlegen, /pdfcrop to toggle`,
-    { parse_mode: 'Markdown' }
+      `Key: ${settings.key ? `\`${settings.key}\`` : 'Not set'}\n` +
+      `Kepubify (Kobo): ${settings.kepubify ? 'ON' : 'OFF'}\n` +
+      `KindleGen: ${settings.kindlegen ? 'ON' : 'OFF'}\n` +
+      `PDF Crop: ${settings.pdfcropmargins ? 'ON' : 'OFF'}\n\n` +
+      `Use /kepubify, /kindlegen, /pdfcrop to toggle`,
+    { parse_mode: 'Markdown' },
   );
 });
 
-bot.onText(/\/kepubify/, (msg) => {
-  const chatId = msg.chat.id;
-  const settings = getUserSettings(chatId);
-  settings.kepubify = !settings.kepubify;
-  bot.sendMessage(chatId, `Kepubify is now ${settings.kepubify ? 'ON' : 'OFF'}`);
-});
+const TOGGLES = {
+  kepubify: { field: 'kepubify', label: 'Kepubify' },
+  kindlegen: { field: 'kindlegen', label: 'KindleGen' },
+  pdfcrop: { field: 'pdfcropmargins', label: 'PDF Crop' },
+};
 
-bot.onText(/\/kindlegen/, (msg) => {
-  const chatId = msg.chat.id;
-  const settings = getUserSettings(chatId);
-  settings.kindlegen = !settings.kindlegen;
-  bot.sendMessage(chatId, `KindleGen is now ${settings.kindlegen ? 'ON' : 'OFF'}`);
-});
+for (const [command, { field, label }] of Object.entries(TOGGLES)) {
+  bot.command(command, async (ctx) => {
+    const settings = getUserSettings(ctx.chat.id);
+    settings[field] = !settings[field];
+    await ctx.reply(`${label} is now ${settings[field] ? 'ON' : 'OFF'}`);
+  });
+}
 
-bot.onText(/\/pdfcrop/, (msg) => {
-  const chatId = msg.chat.id;
-  const settings = getUserSettings(chatId);
-  settings.pdfcropmargins = !settings.pdfcropmargins;
-  bot.sendMessage(chatId, `PDF Crop is now ${settings.pdfcropmargins ? 'ON' : 'OFF'}`);
-});
-
-// Handle document/file uploads
-bot.on('document', async (msg) => {
-  const chatId = msg.chat.id;
-  const settings = getUserSettings(chatId);
+bot.on('message:document', async (ctx) => {
+  const settings = getUserSettings(ctx.chat.id);
 
   if (!settings.key) {
-    bot.sendMessage(chatId,
+    await ctx.reply(
       'Please set your ereader key first!\n\n' +
-      '1. Open send.djazz.se on your ereader\n' +
-      '2. Send me: /setkey YOUR_KEY'
+        '1. Open send.djazz.se on your ereader\n' +
+        '2. Send me: /setkey YOUR_KEY',
     );
     return;
   }
 
-  const doc = msg.document;
-  const fileName = doc.file_name;
-  const fileExt = fileName.substring(fileName.lastIndexOf('.')).toLowerCase();
+  const doc = ctx.message.document;
+  const fileName = doc.file_name ?? 'file';
+  const fileExt = fileName.slice(fileName.lastIndexOf('.')).toLowerCase();
 
   if (!SUPPORTED_EXTENSIONS.includes(fileExt)) {
-    bot.sendMessage(chatId,
-      `Unsupported file type: ${fileExt}\n\n` +
-      `Supported: ${SUPPORTED_EXTENSIONS.join(', ')}`
+    await ctx.reply(
+      `Unsupported file type: ${fileExt}\n\n` + `Supported: ${SUPPORTED_EXTENSIONS.join(', ')}`,
     );
     return;
   }
 
-  const statusMsg = await bot.sendMessage(chatId, `Downloading: ${fileName}...`);
+  if (doc.file_size && doc.file_size > TELEGRAM_MAX_DOWNLOAD_BYTES) {
+    const mb = (doc.file_size / 1024 / 1024).toFixed(1);
+    await ctx.reply(
+      `File is too large: ${mb} MB.\n\n` +
+        `Telegram does not let bots download files over 20 MB, so I cannot forward this one. ` +
+        `Try a smaller file, or upload it directly at send.djazz.se.`,
+    );
+    return;
+  }
+
+  const statusMsg = await ctx.reply(`Downloading: ${fileName}...`);
+  const editStatus = (text) =>
+    ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, text).catch(() => {});
 
   try {
-    // Get file path from Telegram
-    const file = await bot.getFile(doc.file_id);
+    const file = await ctx.getFile();
     const fileUrl = `https://api.telegram.org/file/bot${BOT_TOKEN}/${file.file_path}`;
 
-    // Download file from Telegram
-    await bot.editMessageText(`Uploading to ereader...`, {
-      chat_id: chatId,
-      message_id: statusMsg.message_id
-    });
+    await editStatus('Uploading to ereader...');
 
-    const response = await axios.get(fileUrl, { responseType: 'arraybuffer' });
-    const fileBuffer = Buffer.from(response.data);
-
-    // Create form data for send2ereader
-    const form = new FormData();
-    form.append('key', settings.key);
-    form.append('file', fileBuffer, {
-      filename: fileName,
-      contentType: doc.mime_type || 'application/octet-stream'
-    });
-
-    if (settings.kepubify) form.append('kepubify', 'on');
-    if (settings.kindlegen) form.append('kindlegen', 'on');
-    if (settings.pdfcropmargins) form.append('pdfcropmargins', 'on');
-
-    // Upload to send2ereader
-    const uploadResponse = await axios.post(`${SEND2EREADER_URL}/upload`, form, {
-      headers: form.getHeaders(),
-      maxContentLength: Infinity,
-      maxBodyLength: Infinity
-    });
-
-    await bot.editMessageText(
-      `Sent to ereader: ${fileName}\n\n` +
-      `Make sure your ereader is viewing send.djazz.se with your key!`,
-      {
-        chat_id: chatId,
-        message_id: statusMsg.message_id
-      }
-    );
-
-  } catch (error) {
-    console.error('Error:', error.message);
-    let errorMsg = 'Failed to send file.';
-
-    if (error.response) {
-      errorMsg += ` Server returned: ${error.response.status}`;
+    const res = await fetch(fileUrl);
+    if (!res.ok) {
+      throw new Error(`Telegram file download failed: ${res.status} ${res.statusText}`);
     }
+    const data = new Uint8Array(await res.arrayBuffer());
 
-    await bot.editMessageText(
-      `Error: ${errorMsg}\n\nMake sure your ereader key is correct and your device is connected.`,
-      {
-        chat_id: chatId,
-        message_id: statusMsg.message_id
-      }
+    await uploadToEreader({
+      baseUrl: SEND2EREADER_URL,
+      key: settings.key,
+      filename: fileName,
+      data,
+      contentType: doc.mime_type || 'application/octet-stream',
+      settings,
+    });
+
+    await editStatus(
+      `Sent to ereader: ${fileName}\n\n` +
+        `Make sure your ereader is viewing send.djazz.se with your key!`,
+    );
+  } catch (error) {
+    console.error('Upload failed:', error.message);
+    await editStatus(
+      `Error: Failed to send file. ${error.message}\n\n` +
+        `Make sure your ereader key is correct and your device is connected.`,
     );
   }
 });
 
-console.log('Send2Ereader Bot is running...');
+// Keep the process alive on API/network trouble instead of crash-looping.
+bot.catch((err) => {
+  const e = err.error;
+  if (e instanceof GrammyError) {
+    console.error('Telegram API error:', e.description);
+  } else if (e instanceof HttpError) {
+    console.error('Network error contacting Telegram:', e.message);
+  } else {
+    console.error('Unexpected error:', e);
+  }
+});
+
+bot.start({
+  onStart: () => console.log('Send2Ereader Bot is running...'),
+  // Polling failures (bad token, network blips) land here rather than as an
+  // unhandled rejection, so Coolify logs show a readable reason.
+  drop_pending_updates: false,
+}).catch((err) => {
+  if (err instanceof GrammyError) {
+    console.error(`Polling error: ${err.error_code} ${err.description}`);
+  } else {
+    console.error('Polling error:', err.message ?? err);
+  }
+});

@@ -3,7 +3,8 @@
 A Telegram bot that forwards ebook files directly to your Kobo/Kindle via [send.djazz.se](https://send.djazz.se).
 
 Forked from [JarrodJS/send2ereader-bot](https://github.com/JarrodJS/send2ereader-bot), with the
-hardcoded bot token removed and Docker/Coolify deployment added.
+hardcoded bot token removed and Docker/Coolify deployment added. Rewritten on
+[grammY](https://grammy.dev) with no known dependency vulnerabilities.
 
 ## Features
 
@@ -34,14 +35,26 @@ no port. It needs no domain, no exposed port, and no HTTP healthcheck.
 3. **Deploy**
 4. Check **Logs** for `Send2Ereader Bot is running...`
 
-If you see `Polling error: ETELEGRAM: 401 Unauthorized`, the token is wrong.
-If you see `409 Conflict`, the same token is running in two places at once — see below.
+If you see `Polling error: 401 Unauthorized`, the token is wrong; the process exits instead of
+crash-looping. If you see `409 Conflict`, the same token is running in two places at once — see
+below. Transient network errors and Telegram 5xx responses are retried automatically.
 
 ### Only one instance per token
 
 Telegram permits exactly one long-polling consumer per bot token. Do not scale this service
 past one replica, and stop any local/other copy before deploying, or both will fight for
 updates and drop messages.
+
+## Implementation
+
+Two source files, plain ESM JavaScript, one runtime dependency:
+
+- `index.js` — bot commands and the document handler
+- `upload.js` — the multipart POST to send2ereader, kept separate so it is testable
+- `upload.test.js` — tests for the above, via `node --test`
+
+[grammY](https://grammy.dev) handles the Telegram side; file download and upload use Node's
+built-in `fetch`/`FormData`. There is no database, web server, or build step.
 
 ## Environment variables
 
@@ -52,10 +65,18 @@ updates and drop messages.
 
 ## Local development
 
+Requires Node.js 20 or newer.
+
 ```bash
 npm install
 cp .env.example .env   # then fill in BOT_TOKEN
 BOT_TOKEN=your_token node index.js
+```
+
+Run the tests (they cover the multipart upload against a throwaway local server):
+
+```bash
+npm test
 ```
 
 ## Bot commands
@@ -83,4 +104,5 @@ BOT_TOKEN=your_token node index.js
 - **The bot is open to anyone who finds it.** There is no allowlist — any Telegram user can
   set their own key and push files through your instance. Keep the bot's username private,
   or add a chat-ID check if that matters to you.
-- **Telegram caps bot downloads at 20 MB**, so larger ebooks will fail.
+- **Telegram caps bot downloads at 20 MB.** The bot checks the size up front and replies with a
+  clear message rather than failing opaquely; there is no way around this limit from a bot.

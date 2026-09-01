@@ -1,10 +1,10 @@
-FROM node:20-alpine
+FROM node:24-alpine
 
 # Bot is long-polling only: no ports exposed, no healthcheck endpoint.
 WORKDIR /app
 
-COPY package*.json ./
-RUN npm install --omit=dev && npm cache clean --force
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev && npm cache clean --force
 
 COPY . .
 

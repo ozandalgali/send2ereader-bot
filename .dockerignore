@@ -6,3 +6,4 @@ npm-debug.log
 *.log
 README.md
 render.yaml
+*.test.js
